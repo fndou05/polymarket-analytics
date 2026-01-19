@@ -1,144 +1,88 @@
 # Data Flow
 
-This document describes how market data flows through the system, from Polymarket’s public APIs to frontend analytics views.
+This document describes how market data flows through the backend in **v1**.
 
-The backend acts as a controlled ingestion and transformation layer, not a passive proxy.
+The backend acts as an ingestion and normalization layer, not a passive proxy.
 
 ---
 
-## High-Level Flow
+## High-Level Flow (v1)
 
-1. Fetch raw market data from Polymarket Gamma API
-2. Apply ingestion controls (rate limiting, retries, scheduling)
-3. Normalize external schemas into internal models
-4. Filter markets based on relevance and activity
-5. Enrich markets with computed analytics
-6. Cache processed snapshots in Redis
-7. Serve data through read-only REST endpoints
-8. Visualize and analyze data in the frontend
+1. Fetch active events from Polymarket Gamma API
+2. Flatten event-contained markets
+3. Deserialize raw market payloads defensively
+4. Transform raw markets into analyzed markets
+5. Apply request-time filtering
+6. Serve results via read-only REST endpoints
 
 ---
 
 ## Detailed Pipeline
 
-### 1. Data Ingestion
+### 1. Ingestion (Gamma)
 
-The Rust backend pulls data from the Polymarket Gamma API, including:
+The backend fetches **events** from the Gamma API.
 
-- Markets
-- Events
-- Categories
-- Volume and liquidity metadata
-
-Ingestion is protected by:
-- Rate limiting
-- Retry logic
-- Scheduled polling
-
-This ensures API safety and predictable load.
+Events are treated as the authoritative source because:
+- Active markets are reliably nested under events
+- Standalone market endpoints are inconsistent
+- Event grouping matches Polymarket’s domain model
 
 ---
 
-### 2. Schema Normalization
+### 2. Raw Deserialization
 
-Raw API responses are parsed and converted into stable internal models.
+Gamma payloads are deserialized into internal raw models.
 
-Normalization includes:
-- Converting external field names into internal formats
-- Assigning stable internal IDs
-- Cleaning and standardizing timestamps
-- Resolving inconsistent or optional fields
+This layer:
+- Tolerates missing or malformed fields
+- Handles mixed string/number representations
+- Never assumes schema stability
 
-After this step, downstream components never interact with raw API schemas.
-
----
-
-### 3. Market Filtering
-
-Normalized markets are filtered to remove low-signal or irrelevant data.
-
-Examples include:
-- Excluding inactive or resolved markets
-- Enforcing minimum volume or liquidity thresholds
-- Selecting specific categories or event types
-
-This keeps the dataset focused and frontend-friendly.
+Raw models are internal only and never exposed.
 
 ---
 
-### 4. Market Enrichment
+### 3. Transformation
 
-Filtered markets are enriched with computed fields such as:
-- Aggregated volume or activity metrics
-- Derived statistics
-- Frontend-ready fields
+Raw markets are converted into analyzed markets.
 
-This avoids pushing analytics logic into the UI layer.
+Transformation includes:
+- Normalizing market type (binary, categorical, scalar)
+- Zipping outcomes with prices
+- Deriving probabilities for binary markets
+- Normalizing categories
+- Deriving explicit market status
 
----
-
-### 5. Caching Layer (Redis)
-
-Processed market snapshots are stored in Redis as short-lived cache entries.
-
-Redis stores:
-- Cached market lists
-- Cached per-market detail views
-- TTL-based freshness metadata
-
-Redis is never treated as a source of truth and can be safely flushed or rebuilt.
+This layer is pure logic with no I/O.
 
 ---
 
-### 6. API Access
+### 4. API Filtering
 
-The backend exposes read-only REST endpoints via Axum:
+Filtering is applied **after transformation** to keep the API contract stable.
+
+Examples:
+- Active vs closed markets
+- Resolved vs unresolved markets
+
+---
+
+### 5. API Serving
+
+The backend exposes a clean REST API:
 
 - `GET /health`
 - `GET /markets`
 - `GET /markets/:id`
 
-Requests are served from cache when possible, with background refreshes when data expires.
+All responses contain analyzed, frontend-ready data.
 
 ---
 
-### 7. Frontend Consumption
+## Future Flow (Post-v1)
 
-The Next.js frontend consumes backend APIs to provide:
-
-- Market discovery views
-- Market detail pages
-- Charts and trend analysis
-- Filtering and sorting controls
-
-The frontend never interacts directly with Polymarket APIs.
-
----
-
-## Why This Architecture Exists
-
-Polymarket’s APIs are:
-- Rich but complex
-- Not optimized for frontend consumption
-- Subject to strict rate limits
-
-This backend acts as a **buffer, translator, and analytics preprocessor**, enabling fast and stable data access.
-
----
-
-## Refresh Strategy (MVP)
-
-- Fixed-interval polling
-- Cache-first reads
-- TTL-based freshness
-- No WebSockets
-- No push-based updates
-
----
-
-## Future (Non-MVP)
-
-- Historical snapshot storage
-- Event-driven ingestion
-- AI feature pipelines
-- Real-time streaming and alerts
+- TTL-based in-memory caching
+- Redis-backed cache
+- Background refresh
+- Historical snapshots

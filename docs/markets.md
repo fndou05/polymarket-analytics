@@ -1,46 +1,78 @@
 # Market Model
 
-This document defines the internal market representation.
+This document defines the backend’s **analyzed market** representation.
 
 ---
 
 ## Design Goals
 
+- Normalize inconsistent upstream data
 - Support all Polymarket market types
-- Avoid assumptions about binary outcomes
-- Preserve useful metadata
-- Enable future AI analysis
+- Provide frontend- and LLM-friendly fields
+- Avoid leaking Gamma schema quirks
 
 ---
 
-## Core Market Fields (MVP)
+## AnalyzedMarket (v1)
 
-- id
-- question
-- category
-- volume
-- status
-- outcomes (flexible structure)
+Each market includes:
+
+- `id`
+- `external_slug`
+- `question`
+- `description`
+- `category`
+- `market_type`
+- `outcomes`
+- `pricing`
+- `volume_usd`
+- `liquidity_usd`
+- `timing`
+- `status`
+- `resolution`
+- `context`
+
+---
+
+## Market Status
+
+Markets are explicitly classified as:
+
+- `Active`
+- `Closed`
+- `Resolved`
+
+Status is derived from raw Gamma fields rather than inferred at the UI layer.
+
+---
+
+## Outcomes
+
+Outcomes are normalized into a consistent structure:
+
+- Label
+- Price (if available)
+- Probability (binary markets only)
 
 ---
 
 ## Why Normalize?
 
-Polymarket data:
-- Varies by market type
-- Contains nested structures
-- Is not frontend-friendly
+Gamma data:
+- Uses mixed field types
+- Omits fields inconsistently
+- Changes shape across endpoints
 
 Normalization provides:
-- Stable contracts
+- Stable API contracts
 - Predictable frontend rendering
-- Easier AI feature extraction
+- Easier analytics and reasoning
 
 ---
 
-## Future Extensions
+## Planned Extensions
 
-- Historical price snapshots
-- Market volatility metrics
-- Resolution probability trends
-- Cross-market correlations
+- Market family inference
+- Time interval inference
+- Volatility metrics
+- Historical snapshots
