@@ -1,82 +1,123 @@
 //! HTTP server wiring for the Polymarket analytics backend.
 
 mod models;
+mod gamma;
+mod transform;
 
-use axum::{routing::get, Json, Router};
-use models::{
-    AnalyzedMarket, MarketContext, MarketTiming, MarketType, Outcome,
-    PricingInfo, ResolutionInfo,
+use axum::{
+    extract::{Path, Query},
+    extract::State,
+    http::StatusCode,
+    routing::get,
+    Json, Router,
 };
+use gamma::fetch_raw_markets_from_events;
+use models::{AnalyzedMarket, MarketStatus};
+use serde::Deserialize;
+use std::sync::Arc;
+use reqwest::Client;
 
-/// Health check endpoint used for liveness monitoring.
+/// Basic health check for uptime probes.
 async fn health() -> &'static str {
     "ok"
 }
 
-/// Temporary stub endpoint returning normalized market data.
-///
-/// This will later:
-/// - Fetch Gamma API data
-/// - Parse into RawMarket structs
-/// - Transform into AnalyzedMarket
-/// - Cache results in Redis
-async fn get_markets() -> Json<Vec<AnalyzedMarket>> {
-    let markets = vec![
-        AnalyzedMarket {
-            id: "btc-100k-2025".to_string(),
-            question: "Will Bitcoin hit $100k by the end of 2025?".to_string(),
-            description: Some("Prediction on long-term BTC price performance".to_string()),
-            category: Some("Crypto".to_string()),
-            market_type: MarketType::Binary,
-            outcomes: vec![
-                Outcome {
-                    label: "Yes".to_string(),
-                    probability: Some(0.62),
-                },
-                Outcome {
-                    label: "No".to_string(),
-                    probability: Some(0.38),
-                },
-            ],
-            pricing: PricingInfo {
-                best_bid: Some(0.61),
-                best_ask: Some(0.63),
-                mid_price: Some(0.62),
-            },
-            volume_usd: 150_000.0,
-            liquidity_usd: 25_000.0,
-            timing: MarketTiming {
-                end_time: Some("2025-12-31T23:59:59Z".to_string()),
-                closed_time: None,
-                is_closed: false,
-            },
-            resolution: ResolutionInfo {
-                resolution_source: Some("Market oracle".to_string()),
-                is_resolved: false,
-            },
-            context: MarketContext {
-                event_title: Some("Bitcoin price milestones".to_string()),
-                tags: vec!["crypto".to_string(), "btc".to_string()],
-            },
-        },
-    ];
+/// Returns analyzed markets filtered by optional status query.
+async fn get_markets(
+    Query(params): Query<MarketsQuery>,
+    State(client): State<Arc<Client>>,
+) -> Result<Json<Vec<AnalyzedMarket>>, StatusCode> {
+    // Apply status filtering after transformation to keep the API contract stable.
+    let filter = parse_status_filter(params.status);
 
-    Json(markets)
+    let raw = fetch_raw_markets_from_events(&client)
+        .await
+        .map_err(|e| {
+            eprintln!("fetch_markets failed: {:?}", e);
+            StatusCode::BAD_GATEWAY
+        })?;
+
+    let analyzed: Vec<AnalyzedMarket> = raw
+        .into_iter()
+        .filter_map(transform::analyze_market)
+        .filter(|m| filter.matches(m.status))
+        .collect();
+
+    Ok(Json(analyzed))
 }
 
+/// Fetch a single analyzed market by id (if present in current ingestion).
+async fn get_market_by_id(
+    Path(id): Path<String>,
+    State(client): State<Arc<Client>>,
+) -> Result<Json<AnalyzedMarket>, StatusCode> {
+    let raw = fetch_raw_markets_from_events(&client)
+        .await
+        .map_err(|e| {
+            eprintln!("fetch_markets failed: {:?}", e);
+            StatusCode::BAD_GATEWAY
+        })?;
+
+    raw.into_iter()
+        .filter_map(transform::analyze_market)
+        .find(|m| m.id == id)
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+/// Server entry point.
 #[tokio::main]
 async fn main() {
+    let client = Arc::new(Client::new());
+
     let app = Router::new()
         .route("/health", get(health))
-        .route("/markets", get(get_markets));
+        .route("/markets", get(get_markets))
+        .route("/markets/:id", get(get_market_by_id))
+        .with_state(client);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000")
         .await
-        .expect("failed to bind to port");
+        .expect("failed to bind");
 
-    println!("Server running at http://localhost:3000");
+    println!("Server running on http://localhost:3000");
 
-    axum::serve(listener, app)
-        .await
-        .expect("server error");
+    axum::serve(listener, app).await.unwrap();
+}
+
+#[derive(Debug, Deserialize)]
+struct MarketsQuery {
+    status: Option<String>,
+}
+
+enum StatusFilter {
+    Active,
+    Closed,
+    Resolved,
+    Inactive,
+    All,
+}
+
+impl StatusFilter {
+    fn matches(&self, status: MarketStatus) -> bool {
+        match self {
+            StatusFilter::Active => status == MarketStatus::Active,
+            StatusFilter::Closed => status == MarketStatus::Closed,
+            StatusFilter::Resolved => status == MarketStatus::Resolved,
+            StatusFilter::Inactive => {
+                status == MarketStatus::Closed || status == MarketStatus::Resolved
+            }
+            StatusFilter::All => true,
+        }
+    }
+}
+
+fn parse_status_filter(value: Option<String>) -> StatusFilter {
+    match value.as_deref().map(|v| v.trim().to_ascii_lowercase()) {
+        Some(ref v) if v == "closed" => StatusFilter::Closed,
+        Some(ref v) if v == "resolved" => StatusFilter::Resolved,
+        Some(ref v) if v == "inactive" => StatusFilter::Inactive,
+        Some(ref v) if v == "all" => StatusFilter::All,
+        _ => StatusFilter::Active,
+    }
 }

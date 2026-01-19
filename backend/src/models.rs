@@ -1,91 +1,58 @@
-//! Domain models for the Polymarket analytics backend.
-//!
-//! IMPORTANT:
-//! This file defines the *stable* internal representation used for
-//! analytics, AI reasoning, and frontend consumption.
-//!
-//! Raw Gamma API models will be added later and transformed into these.
+//! Domain models and Gamma API models.
 
-use serde::Serialize;
+use serde::de::{self, Deserializer};
+use serde::{Deserialize, Serialize};
 
-/// Fully normalized market representation used by the product.
-///
-/// This is the ONLY market model exposed to the frontend and future AI systems.
 #[derive(Debug, Serialize)]
 pub struct AnalyzedMarket {
-    /// Stable internal identifier.
     pub id: String,
-
-    // ───────── Core meaning ─────────
-    /// Human-readable prediction question.
+    pub external_slug: String,
+    pub market_family_key: Option<String>,
+    pub interval: Option<MarketInterval>,
     pub question: String,
-
-    /// Optional extended description or context.
     pub description: Option<String>,
-
-    /// High-level category (e.g. Crypto, Politics).
     pub category: Option<String>,
-
-    /// Market structure (binary, categorical, scalar).
     pub market_type: MarketType,
-
-    // ───────── Outcomes & pricing ─────────
-    /// Possible outcomes for the market.
     pub outcomes: Vec<Outcome>,
-
-    /// Aggregated pricing information.
     pub pricing: PricingInfo,
-
-    // ───────── Market strength ─────────
-    /// Total traded volume in USD.
     pub volume_usd: f64,
-
-    /// Estimated available liquidity in USD.
     pub liquidity_usd: f64,
-
-    // ───────── Timing & resolution ─────────
     pub timing: MarketTiming,
+    pub status: MarketStatus,
     pub resolution: ResolutionInfo,
-
-    // ───────── AI / analysis hooks ─────────
     pub context: MarketContext,
 }
 
-/// Supported market types across Polymarket.
 #[derive(Debug, Serialize)]
 pub enum MarketType {
-    /// Two-outcome market (Yes / No).
     Binary,
-
-    /// Multiple discrete outcomes.
     Categorical,
-
-    /// Continuous value with bounds.
-    Scalar {
-        lower_bound: f64,
-        upper_bound: f64,
-    },
+    Scalar { lower_bound: f64, upper_bound: f64 },
 }
 
-/// A single possible outcome of a market.
+#[derive(Debug, Serialize)]
+pub enum MarketInterval {
+    M15,
+    H1,
+    H4,
+}
+
 #[derive(Debug, Serialize)]
 pub struct Outcome {
-    /// Display label (e.g. "Yes", "No", "Trump", "Biden").
     pub label: String,
-
-    /// Normalized probability (if available).
+    pub price: Option<f64>,
     pub probability: Option<f64>,
 }
 
-/// Aggregated pricing information for analysis.
 #[derive(Debug, Serialize)]
 pub struct PricingInfo {
     pub best_bid: Option<f64>,
     pub best_ask: Option<f64>,
     pub mid_price: Option<f64>,
+    pub last_price: Option<f64>,
+    pub change_24h: Option<f64>,
 }
 
-/// Timing and lifecycle state of a market.
 #[derive(Debug, Serialize)]
 pub struct MarketTiming {
     pub end_time: Option<String>,
@@ -93,16 +60,139 @@ pub struct MarketTiming {
     pub is_closed: bool,
 }
 
-/// Resolution metadata.
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MarketStatus {
+    Active,
+    Closed,
+    Resolved,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ResolutionInfo {
     pub resolution_source: Option<String>,
     pub is_resolved: bool,
 }
 
-/// Additional contextual metadata useful for AI analysis.
 #[derive(Debug, Serialize)]
 pub struct MarketContext {
     pub event_title: Option<String>,
     pub tags: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RawMarket {
+    pub id: String,
+    pub slug: String,
+    pub question: String,
+    pub description: Option<String>,
+    pub category: Option<String>,
+
+    #[serde(rename = "marketType", default)]
+    pub market_type: Option<String>,
+
+    #[serde(deserialize_with = "deserialize_outcomes")]
+    pub outcomes: Vec<String>,
+
+    #[serde(rename = "outcomePrices", default, deserialize_with = "deserialize_outcome_prices")]
+    pub outcome_prices: Vec<Option<f64>>,
+
+    #[serde(rename = "volumeUSD", default)]
+    pub volume_usd: Option<String>,
+
+    #[serde(rename = "liquidityUSD", default)]
+    pub liquidity_usd: Option<String>,
+
+    #[serde(rename = "endDate")]
+    pub end_time: Option<String>,
+
+    #[serde(rename = "closed")]
+    pub closed: bool,
+
+    #[serde(rename = "lowerBound", default, deserialize_with = "deserialize_opt_f64")]
+    pub lower_bound: Option<f64>,
+
+    #[serde(rename = "upperBound", default, deserialize_with = "deserialize_opt_f64")]
+    pub upper_bound: Option<f64>,
+
+    #[serde(rename = "resolutionSource")]
+    pub resolution_source: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RawEvent {
+    pub id: String,
+    pub title: String,
+    pub markets: Vec<RawMarket>,
+}
+
+fn deserialize_outcomes<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Array(arr) => arr
+            .into_iter()
+            .map(|v| v.as_str().map(String::from).ok_or_else(|| de::Error::custom("invalid outcome")))
+            .collect(),
+        serde_json::Value::String(s) => serde_json::from_str(&s).map_err(de::Error::custom),
+        _ => Err(de::Error::custom("invalid outcomes format")),
+    }
+}
+
+fn deserialize_outcome_prices<'de, D>(deserializer: D) -> Result<Vec<Option<f64>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    fn parse_val<E>(v: serde_json::Value) -> Result<Option<f64>, E>
+    where
+        E: de::Error,
+    {
+        match v {
+            serde_json::Value::Null => Ok(None),
+            serde_json::Value::Number(n) => Ok(n.as_f64()),
+            serde_json::Value::String(s) => {
+                if s.trim().is_empty() {
+                    Ok(None)
+                } else {
+                    s.parse::<f64>().map(Some).map_err(E::custom)
+                }
+            }
+            _ => Err(E::custom("invalid outcome price")),
+        }
+    }
+
+    match value {
+        None => Ok(Vec::new()),
+        Some(serde_json::Value::Array(arr)) => arr.into_iter().map(parse_val::<D::Error>).collect(),
+        Some(serde_json::Value::String(s)) => {
+            if s.trim().is_empty() {
+                Ok(Vec::new())
+            } else {
+                let parsed: serde_json::Value =
+                    serde_json::from_str(&s).map_err(de::Error::custom)?;
+                match parsed {
+                    serde_json::Value::Array(arr) => {
+                        arr.into_iter().map(parse_val::<D::Error>).collect()
+                    }
+                    _ => Err(de::Error::custom("invalid outcome prices format")),
+                }
+            }
+        }
+        _ => Err(de::Error::custom("invalid outcome prices format")),
+    }
+}
+
+fn deserialize_opt_f64<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match value {
+        Some(serde_json::Value::Number(n)) => Ok(n.as_f64()),
+        Some(serde_json::Value::String(s)) => Ok(s.parse::<f64>().ok()),
+        _ => Ok(None),
+    }
 }
