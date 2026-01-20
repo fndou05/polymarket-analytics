@@ -36,14 +36,15 @@ Reasoning:
 
 ---
 
-## No Cache in v1
+## Caching Strategy (v1)
 
-Caching is intentionally deferred.
-
-Reasoning:
-- Ingestion logic must stabilize first
-- Cache semantics must be well-defined
-- Avoid premature infrastructure complexity
+- Source of truth: Polymarket Gamma API
+- Cached data: AnalyzedMarket only
+- Cache type: read-through TTL cache
+- TTL: 60 seconds
+- Stale data allowed within TTL
+- Cache is never authoritative
+- Redis will replace in-memory cache without API changes
 
 ---
 

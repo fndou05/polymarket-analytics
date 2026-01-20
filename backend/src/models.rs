@@ -3,7 +3,7 @@
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct AnalyzedMarket {
     pub id: String,
     pub external_slug: String,
@@ -23,28 +23,28 @@ pub struct AnalyzedMarket {
     pub context: MarketContext,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub enum MarketType {
     Binary,
     Categorical,
     Scalar { lower_bound: f64, upper_bound: f64 },
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub enum MarketInterval {
     M15,
     H1,
     H4,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct Outcome {
     pub label: String,
     pub price: Option<f64>,
     pub probability: Option<f64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct PricingInfo {
     pub best_bid: Option<f64>,
     pub best_ask: Option<f64>,
@@ -53,7 +53,7 @@ pub struct PricingInfo {
     pub change_24h: Option<f64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct MarketTiming {
     pub end_time: Option<String>,
     pub closed_time: Option<String>,
@@ -68,13 +68,13 @@ pub enum MarketStatus {
     Resolved,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct ResolutionInfo {
     pub resolution_source: Option<String>,
     pub is_resolved: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct MarketContext {
     pub event_title: Option<String>,
     pub tags: Vec<String>,

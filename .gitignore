@@ -1,5 +1,7 @@
 # Rust
 /target/
+target/
+backend/target/
 
 # IDEs
 .idea/
