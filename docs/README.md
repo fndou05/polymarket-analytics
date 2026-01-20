@@ -74,17 +74,33 @@ Server runs at: http://localhost:3000
 
 ## Project Status
 
-Backend stable (v2).
+The backend API is **stable and frozen** as of **v2.0.0**.
 
-Current capabilities:
-- Stable event-based ingestion
-- Explicit market normalization
-- Deterministic analytics fields
-- Cursor-based pagination
-- Pluggable caching (in-memory / Redis)
-- Explicit error handling and tracing
+### Stability Guarantees
 
-Next planned work:
+- API routes and response schemas are frozen
+- Cursor-based pagination behavior is fixed
+- Analytics fields are deterministic and versioned
+- Cache semantics (TTL, read-through behavior) are explicit and consistent
+
+Any breaking change will result in a new **major version**.
+
+---
+
+### Current Capabilities
+
+- Event-based ingestion from Polymarket Gamma
+- Defensive raw deserialization and schema normalization
+- Explicit market state derivation (active, closed, resolved)
+- Deterministic analytics fields for downstream reasoning
+- Cursor-based pagination for incremental consumption
+- Pluggable caching layer (in-memory or Redis)
+- Structured error handling and request-level tracing
+
+---
+
+### Planned Extensions
+
 - Historical snapshot storage
-- Time-series analytics
-- Frontend integration
+- Time-series analytics and trend derivation
+- Frontend integration and visualization
