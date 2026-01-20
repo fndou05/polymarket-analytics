@@ -4,6 +4,7 @@ use axum::{
 };
 use std::fmt;
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum ApiError {
     GammaFetch(reqwest::Error),
@@ -36,3 +37,19 @@ impl IntoResponse for ApiError {
         self.status_code().into_response()
     }
 }
+
+#[allow(dead_code)]
+#[derive(Debug)]
+pub enum CacheError {
+    Redis(redis::RedisError),
+    Serialization(serde_json::Error),
+    Internal(String),
+}
+
+impl fmt::Display for CacheError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl std::error::Error for CacheError {}

@@ -1,25 +1,31 @@
 //! HTTP server wiring for the Polymarket analytics backend.
 
-mod models;
-mod gamma;
-mod transform;
-mod error;
+mod analytics;
 mod cache;
+mod config;
+mod error;
+mod gamma;
+mod models;
+mod pagination;
+mod transform;
 
 use axum::{
-    extract::{Path, Query},
     extract::{FromRef, State},
+    extract::{Path, Query},
     routing::get,
     Json, Router,
 };
-use cache::{CacheStore, InMemoryCacheStore};
+use cache::redis::RedisCacheStore;
+use cache::{CacheStore, CacheStoreImpl, InMemoryCacheStore};
+use config::{CacheBackend, CacheConfig};
 use error::ApiError;
 use gamma::fetch_raw_markets_from_events;
-use models::{AnalyzedMarket, MarketStatus};
+use models::{AnalyzedMarket, MarketStatus, PaginatedResponse};
+use pagination::{paginate_markets, parse_status_filter, StatusFilter};
+use reqwest::Client;
 use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Duration;
-use reqwest::Client;
 
 /// Basic health check for uptime probes.
 async fn health() -> &'static str {
@@ -30,48 +36,72 @@ async fn health() -> &'static str {
 async fn get_markets(
     Query(params): Query<MarketsQuery>,
     State(client): State<Arc<Client>>,
-    State(cache): State<Arc<dyn CacheStore>>,
-) -> Result<Json<Vec<AnalyzedMarket>>, ApiError> {
+    State(cache): State<Arc<CacheStoreImpl>>,
+    State(cache_ttl): State<Duration>,
+) -> Result<Json<PaginatedResponse<AnalyzedMarket>>, ApiError> {
     // Apply status filtering after transformation to keep the API contract stable.
     let filter = parse_status_filter(params.status);
 
     let start = std::time::Instant::now();
 
+    let limit = params.limit.unwrap_or(50).min(100);
+    let cursor = params.cursor.as_deref();
+
     if matches!(filter, StatusFilter::Active) {
-        if let Some(markets) = cache.get_active() {
-            tracing::info!("cache hit: active");
-            let elapsed = start.elapsed();
-            tracing::info!("GET /markets status={:?} duration={:?}", filter, elapsed);
-            return Ok(Json(markets));
+        match cache.get::<Vec<AnalyzedMarket>>(CACHE_KEY_ACTIVE).await {
+            Ok(Some(markets)) => {
+                tracing::info!("cache hit: active");
+                let response = paginate_markets(markets, &filter, limit, cursor);
+                let elapsed = start.elapsed();
+                tracing::info!("GET /markets status={:?} duration={:?}", filter, elapsed);
+                return Ok(Json(response));
+            }
+            Ok(None) => {}
+            Err(err) => {
+                tracing::error!("cache read failed: {}", err);
+            }
         }
-        if let Some(markets) = cache.get_all() {
-            tracing::info!("cache hit: all");
-            let filtered = apply_filter(&filter, markets);
-            let elapsed = start.elapsed();
-            tracing::info!("GET /markets status={:?} duration={:?}", filter, elapsed);
-            return Ok(Json(filtered));
+
+        match cache.get::<Vec<AnalyzedMarket>>(CACHE_KEY_ALL).await {
+            Ok(Some(markets)) => {
+                tracing::info!("cache hit: all");
+                let response = paginate_markets(markets, &filter, limit, cursor);
+                let elapsed = start.elapsed();
+                tracing::info!("GET /markets status={:?} duration={:?}", filter, elapsed);
+                return Ok(Json(response));
+            }
+            Ok(None) => {}
+            Err(err) => {
+                tracing::error!("cache read failed: {}", err);
+            }
         }
-    } else if let Some(markets) = cache.get_all() {
-        tracing::info!("cache hit: all");
-        let filtered = apply_filter(&filter, markets);
-        let elapsed = start.elapsed();
-        tracing::info!("GET /markets status={:?} duration={:?}", filter, elapsed);
-        return Ok(Json(filtered));
+    } else {
+        match cache.get::<Vec<AnalyzedMarket>>(CACHE_KEY_ALL).await {
+            Ok(Some(markets)) => {
+                tracing::info!("cache hit: all");
+                let response = paginate_markets(markets, &filter, limit, cursor);
+                let elapsed = start.elapsed();
+                tracing::info!("GET /markets status={:?} duration={:?}", filter, elapsed);
+                return Ok(Json(response));
+            }
+            Ok(None) => {}
+            Err(err) => {
+                tracing::error!("cache read failed: {}", err);
+            }
+        }
     }
 
     tracing::info!("cache miss: markets");
 
-    let raw = fetch_raw_markets_from_events(&client)
-        .await
-        .map_err(|e| {
-            let api_error = if e.is_decode() {
-                ApiError::GammaDeserialize(e)
-            } else {
-                ApiError::GammaFetch(e)
-            };
-            tracing::error!("request failed: {}", api_error);
-            api_error
-        })?;
+    let raw = fetch_raw_markets_from_events(&client).await.map_err(|e| {
+        let api_error = if e.is_decode() {
+            ApiError::GammaDeserialize(e)
+        } else {
+            ApiError::GammaFetch(e)
+        };
+        tracing::error!("request failed: {}", api_error);
+        api_error
+    })?;
 
     let analyzed_all: Vec<AnalyzedMarket> = raw
         .into_iter()
@@ -84,14 +114,26 @@ async fn get_markets(
         .cloned()
         .collect();
 
-    cache.set_all(analyzed_all.clone());
-    cache.set_active(analyzed_active.clone());
+    if let Err(err) = cache.set(CACHE_KEY_ALL, &analyzed_all, cache_ttl).await {
+        tracing::error!("cache write failed: {}", err);
+    }
+
+    if let Err(err) = cache
+        .set(CACHE_KEY_ACTIVE, &analyzed_active, cache_ttl)
+        .await
+    {
+        tracing::error!("cache write failed: {}", err);
+    }
 
     let response = if matches!(filter, StatusFilter::Active) {
-        Ok(Json(analyzed_active))
+        Ok(Json(paginate_markets(
+            analyzed_active,
+            &filter,
+            limit,
+            cursor,
+        )))
     } else {
-        let filtered = apply_filter(&filter, analyzed_all);
-        Ok(Json(filtered))
+        Ok(Json(paginate_markets(analyzed_all, &filter, limit, cursor)))
     };
 
     let elapsed = start.elapsed();
@@ -103,47 +145,58 @@ async fn get_markets(
 async fn get_market_by_id(
     Path(id): Path<String>,
     State(client): State<Arc<Client>>,
-    State(cache): State<Arc<dyn CacheStore>>,
+    State(cache): State<Arc<CacheStoreImpl>>,
+    State(cache_ttl): State<Duration>,
 ) -> Result<Json<AnalyzedMarket>, ApiError> {
     let start = std::time::Instant::now();
 
-    if let Some(markets) = cache.get_all() {
-        tracing::info!("cache hit: all");
-        let response = markets
-            .into_iter()
-            .find(|m| m.id == id)
-            .map(Json)
-            .ok_or(ApiError::NotFound);
-        let elapsed = start.elapsed();
-        tracing::info!("GET /markets/:id duration={:?}", elapsed);
-        return response;
+    match cache.get::<Vec<AnalyzedMarket>>(CACHE_KEY_ALL).await {
+        Ok(Some(markets)) => {
+            tracing::info!("cache hit: all");
+            let response = markets
+                .into_iter()
+                .find(|m| m.id == id)
+                .map(Json)
+                .ok_or(ApiError::NotFound);
+            let elapsed = start.elapsed();
+            tracing::info!("GET /markets/:id duration={:?}", elapsed);
+            return response;
+        }
+        Ok(None) => {}
+        Err(err) => {
+            tracing::error!("cache read failed: {}", err);
+        }
     }
 
-    if let Some(markets) = cache.get_active() {
-        tracing::info!("cache hit: active");
-        let response = markets
-            .into_iter()
-            .find(|m| m.id == id)
-            .map(Json)
-            .ok_or(ApiError::NotFound);
-        let elapsed = start.elapsed();
-        tracing::info!("GET /markets/:id duration={:?}", elapsed);
-        return response;
+    match cache.get::<Vec<AnalyzedMarket>>(CACHE_KEY_ACTIVE).await {
+        Ok(Some(markets)) => {
+            tracing::info!("cache hit: active");
+            let response = markets
+                .into_iter()
+                .find(|m| m.id == id)
+                .map(Json)
+                .ok_or(ApiError::NotFound);
+            let elapsed = start.elapsed();
+            tracing::info!("GET /markets/:id duration={:?}", elapsed);
+            return response;
+        }
+        Ok(None) => {}
+        Err(err) => {
+            tracing::error!("cache read failed: {}", err);
+        }
     }
 
     tracing::info!("cache miss: market by id");
 
-    let raw = fetch_raw_markets_from_events(&client)
-        .await
-        .map_err(|e| {
-            let api_error = if e.is_decode() {
-                ApiError::GammaDeserialize(e)
-            } else {
-                ApiError::GammaFetch(e)
-            };
-            tracing::error!("request failed: {}", api_error);
-            api_error
-        })?;
+    let raw = fetch_raw_markets_from_events(&client).await.map_err(|e| {
+        let api_error = if e.is_decode() {
+            ApiError::GammaDeserialize(e)
+        } else {
+            ApiError::GammaFetch(e)
+        };
+        tracing::error!("request failed: {}", api_error);
+        api_error
+    })?;
 
     let analyzed_all: Vec<AnalyzedMarket> = raw
         .into_iter()
@@ -156,8 +209,16 @@ async fn get_market_by_id(
         .cloned()
         .collect();
 
-    cache.set_all(analyzed_all.clone());
-    cache.set_active(analyzed_active);
+    if let Err(err) = cache.set(CACHE_KEY_ALL, &analyzed_all, cache_ttl).await {
+        tracing::error!("cache write failed: {}", err);
+    }
+
+    if let Err(err) = cache
+        .set(CACHE_KEY_ACTIVE, &analyzed_active, cache_ttl)
+        .await
+    {
+        tracing::error!("cache write failed: {}", err);
+    }
 
     let response = analyzed_all
         .into_iter()
@@ -178,11 +239,24 @@ async fn main() {
         .compact()
         .init();
     let client = Arc::new(Client::new());
-    // TTL = 45 seconds to keep Gamma load low without going stale for long.
-    let cache: Arc<dyn CacheStore> =
-        Arc::new(InMemoryCacheStore::new(Duration::from_secs(45)));
+    let cache_config = CacheConfig::from_env();
+    let backend_name = match &cache_config.backend {
+        CacheBackend::InMemory => "in-memory",
+        CacheBackend::Redis { .. } => "redis",
+    };
+    tracing::info!("cache backend: {} ttl={:?}", backend_name, cache_config.ttl);
+    let cache = match cache_config.backend {
+        CacheBackend::InMemory => CacheStoreImpl::InMemory(InMemoryCacheStore::new()),
+        CacheBackend::Redis { ref url } => {
+            CacheStoreImpl::Redis(RedisCacheStore::new(url).expect("failed to connect to redis"))
+        }
+    };
 
-    let app_state = AppState { client, cache };
+    let app_state = AppState {
+        client,
+        cache: Arc::new(cache),
+        cache_ttl: cache_config.ttl,
+    };
 
     let app = Router::new()
         .route("/health", get(health))
@@ -202,12 +276,15 @@ async fn main() {
 #[derive(Debug, Deserialize)]
 struct MarketsQuery {
     status: Option<String>,
+    limit: Option<usize>,
+    cursor: Option<String>,
 }
 
 #[derive(Clone)]
 struct AppState {
     client: Arc<Client>,
-    cache: Arc<dyn CacheStore>,
+    cache: Arc<CacheStoreImpl>,
+    cache_ttl: Duration,
 }
 
 impl FromRef<AppState> for Arc<Client> {
@@ -216,54 +293,17 @@ impl FromRef<AppState> for Arc<Client> {
     }
 }
 
-impl FromRef<AppState> for Arc<dyn CacheStore> {
-    fn from_ref(state: &AppState) -> Arc<dyn CacheStore> {
+impl FromRef<AppState> for Arc<CacheStoreImpl> {
+    fn from_ref(state: &AppState) -> Arc<CacheStoreImpl> {
         state.cache.clone()
     }
 }
 
-#[derive(Debug)]
-enum StatusFilter {
-    Active,
-    Closed,
-    Resolved,
-    Inactive,
-    All,
-}
-
-impl StatusFilter {
-    fn matches(&self, status: MarketStatus) -> bool {
-        match self {
-            StatusFilter::Active => status == MarketStatus::Active,
-            StatusFilter::Closed => status == MarketStatus::Closed,
-            StatusFilter::Resolved => status == MarketStatus::Resolved,
-            StatusFilter::Inactive => {
-                status == MarketStatus::Closed || status == MarketStatus::Resolved
-            }
-            StatusFilter::All => true,
-        }
+impl FromRef<AppState> for Duration {
+    fn from_ref(state: &AppState) -> Duration {
+        state.cache_ttl
     }
 }
 
-fn parse_status_filter(value: Option<String>) -> StatusFilter {
-    match value.as_deref().map(|v| v.trim().to_ascii_lowercase()) {
-        Some(ref v) if v == "closed" => StatusFilter::Closed,
-        Some(ref v) if v == "resolved" => StatusFilter::Resolved,
-        Some(ref v) if v == "inactive" => StatusFilter::Inactive,
-        Some(ref v) if v == "all" => StatusFilter::All,
-        _ => StatusFilter::Active,
-    }
-}
-
-fn apply_filter(
-    filter: &StatusFilter,
-    markets: Vec<AnalyzedMarket>,
-) -> Vec<AnalyzedMarket> {
-    match filter {
-        StatusFilter::All => markets,
-        _ => markets
-            .into_iter()
-            .filter(|m| filter.matches(m.status))
-            .collect(),
-    }
-}
+const CACHE_KEY_ACTIVE: &str = "markets:active";
+const CACHE_KEY_ALL: &str = "markets:all";

@@ -1,7 +1,7 @@
 //! Gamma API ingestion via events (stable source for active markets).
 
-use reqwest::Client;
 use crate::models::{RawEvent, RawMarket};
+use reqwest::Client;
 
 const GAMMA_BASE_URL: &str = "https://gamma-api.polymarket.com";
 const EVENT_LIMIT: &str = "200"; // small, predictable payload for v1
@@ -14,10 +14,7 @@ pub async fn fetch_raw_markets_from_events(
     let url = format!("{}/events", GAMMA_BASE_URL);
     let events = client
         .get(url)
-        .query(&[
-            ("active", "true"),
-            ("limit", EVENT_LIMIT),
-        ])
+        .query(&[("active", "true"), ("limit", EVENT_LIMIT)])
         .header("User-Agent", USER_AGENT)
         .header("Accept", "application/json")
         .send()

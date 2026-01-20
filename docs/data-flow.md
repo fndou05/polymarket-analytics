@@ -2,7 +2,8 @@
 
 This document describes how market data flows through the backend in **v1**.
 
-The backend acts as an ingestion and normalization layer, not a passive proxy.
+The backend acts as an ingestion, normalization, and analytics layer,
+not a passive proxy.
 
 ---
 
@@ -12,8 +13,10 @@ The backend acts as an ingestion and normalization layer, not a passive proxy.
 2. Flatten event-contained markets
 3. Deserialize raw market payloads defensively
 4. Transform raw markets into analyzed markets
-5. Apply request-time filtering
-6. Serve results via read-only REST endpoints
+5. Compute deterministic analytics fields
+6. Cache analyzed results (read-through)
+7. Apply request-time filtering and pagination
+8. Serve results via read-only REST endpoints
 
 ---
 
@@ -28,6 +31,8 @@ Events are treated as the authoritative source because:
 - Standalone market endpoints are inconsistent
 - Event grouping matches Polymarket’s domain model
 
+Gamma remains the sole source of truth.
+
 ---
 
 ### 2. Raw Deserialization
@@ -37,6 +42,7 @@ Gamma payloads are deserialized into internal raw models.
 This layer:
 - Tolerates missing or malformed fields
 - Handles mixed string/number representations
+- Avoids failing ingestion due to partial data
 - Never assumes schema stability
 
 Raw models are internal only and never exposed.
@@ -51,38 +57,75 @@ Transformation includes:
 - Normalizing market type (binary, categorical, scalar)
 - Zipping outcomes with prices
 - Deriving probabilities for binary markets
-- Normalizing categories
+- Normalizing category strings
 - Deriving explicit market status
 
-This layer is pure logic with no I/O.
+This layer is pure logic with no HTTP or cache access.
 
 ---
 
-### 4. API Filtering
+### 4. Deterministic Analytics
 
-Filtering is applied **after transformation** to keep the API contract stable.
+Additional analytics fields are derived synchronously.
 
 Examples:
-- Active vs closed markets
-- Resolved vs unresolved markets
+- Probability spreads
+- Confidence heuristics
+- Outcome entropy
+- Liquidity-based signals
+
+These fields are:
+- Deterministic
+- Non-AI
+- Computed at request time
 
 ---
 
-### 5. API Serving
+### 5. Read-Through Caching
 
-The backend exposes a clean REST API:
+Analyzed market collections are cached using read-through semantics.
+
+Caching behavior:
+- Stores analyzed data only
+- TTL-based freshness
+- Cache is never authoritative
+- Identical semantics across cache backends
+
+In-memory and Redis caches are interchangeable.
+
+---
+
+### 6. Request-Time Filtering & Pagination
+
+Filtering and pagination are applied **after caching**.
+
+This ensures:
+- Stable API contracts
+- Deterministic pagination
+- Safe incremental fetching
+
+Pagination is cursor-based and ordering is deterministic.
+
+---
+
+### 7. API Serving
+
+The backend exposes a clean, read-only REST API:
 
 - `GET /health`
 - `GET /markets`
 - `GET /markets/:id`
 
-All responses contain analyzed, frontend-ready data.
+All responses contain analyzed, analytics-ready data suitable
+for frontend consumption and LLM processing.
 
 ---
 
-## Future Flow (Post-v1)
+## Non-Goals (v1)
 
-- TTL-based in-memory caching
-- Redis-backed cache
-- Background refresh
-- Historical snapshots
+- No background jobs
+- No database
+- No streaming or WebSockets
+- No persistence guarantees
+
+These are deferred intentionally.

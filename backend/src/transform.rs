@@ -1,9 +1,16 @@
 //! Raw -> analyzed market transformation.
 
+use crate::analytics::compute_analytics;
 use crate::models::*;
 
 /// Convert a raw Gamma market into the stable API model.
 pub fn analyze_market(raw: RawMarket) -> Option<AnalyzedMarket> {
+    let base = transform_market(raw)?;
+    let analytics = compute_analytics(&base);
+    Some(base.with_analytics(analytics))
+}
+
+fn transform_market(raw: RawMarket) -> Option<AnalyzedMarketBase> {
     // Some event markets omit marketType; default to binary to avoid dropping valid markets.
     let market_type_key = raw
         .market_type
@@ -30,7 +37,11 @@ pub fn analyze_market(raw: RawMarket) -> Option<AnalyzedMarket> {
             Outcome {
                 label,
                 price,
-                probability: if matches!(market_type, MarketType::Binary) { price } else { None },
+                probability: if matches!(market_type, MarketType::Binary) {
+                    price
+                } else {
+                    None
+                },
             }
         })
         .collect();
@@ -45,7 +56,7 @@ pub fn analyze_market(raw: RawMarket) -> Option<AnalyzedMarket> {
         MarketStatus::Active
     };
 
-    Some(AnalyzedMarket {
+    Some(AnalyzedMarketBase {
         id: raw.id,
         external_slug: raw.slug,
         market_family_key: None,
@@ -63,7 +74,10 @@ pub fn analyze_market(raw: RawMarket) -> Option<AnalyzedMarket> {
             change_24h: None,
         },
         volume_usd: raw.volume_usd.and_then(|v| v.parse().ok()).unwrap_or(0.0),
-        liquidity_usd: raw.liquidity_usd.and_then(|v| v.parse().ok()).unwrap_or(0.0),
+        liquidity_usd: raw
+            .liquidity_usd
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.0),
         timing: MarketTiming {
             end_time: raw.end_time,
             closed_time: None,

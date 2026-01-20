@@ -1,6 +1,7 @@
 # Engineering Decisions
 
-This document records intentional architectural decisions.
+This document records intentional architectural decisions and tradeoffs
+made during development of the Polymarket Analytics backend.
 
 ---
 
@@ -8,10 +9,13 @@ This document records intentional architectural decisions.
 
 Chosen for:
 - Strong type safety
-- Predictable performance
 - Async-first ecosystem
+- Performance predictability
+- Explicit error handling
 - Resume credibility
-- Alignment with Polymarket tooling
+
+Rust enables the backend to behave like a long-running service
+rather than a scripting layer.
 
 ---
 
@@ -20,8 +24,8 @@ Chosen for:
 Chosen for:
 - Modern async design
 - Explicit extractor-based request handling
+- Clear separation of request parsing and business logic
 - Minimal abstraction overhead
-- Clear separation of concerns
 
 ---
 
@@ -29,48 +33,69 @@ Chosen for:
 
 Markets are ingested by flattening **events**, not by querying markets directly.
 
-Reasoning:
-- Active markets are reliably nested under events
-- Standalone market endpoints are inconsistent
+Reasons:
+- Active markets reliably exist under events
 - Event grouping reflects Polymarket’s domain model
+- Standalone market endpoints are inconsistent
+
+Gamma remains the sole source of truth.
 
 ---
 
-## Caching Strategy (v1)
+## Defensive Deserialization
 
-- Source of truth: Polymarket Gamma API
-- Cached data: AnalyzedMarket only
-- Cache type: read-through TTL cache
-- TTL: 60 seconds
-- Stale data allowed within TTL
+Gamma payloads are treated as untrusted input.
+
+Decisions:
+- Tolerate mixed field types
+- Allow missing or null fields
+- Avoid failing ingestion due to partial data
+
+This prevents upstream schema instability from breaking the service.
+
+---
+
+## Read-Through Caching
+
+- Cache stores analyzed data only
 - Cache is never authoritative
-- Redis will replace in-memory cache without API changes
+- TTL-based freshness
+- Read-through semantics
+- Redis and in-memory caches share identical behavior
+
+Caching exists to reduce load on Gamma and improve response latency,
+not to own data.
 
 ---
 
-## REST over WebSockets
+## Cursor-Based Pagination
 
-Chosen for v1 because:
-- Easier to debug
-- Easier to cache
-- Easier to reason about
-- Sufficient for analytics use cases
+Chosen over offset-based pagination because:
+- Stable across refreshes
+- Safer for changing datasets
+- Deterministic ordering
+- Better support for frontend incremental loading
+- Better support for LLM chunking
 
 ---
 
-## No Database in v1
+## Deterministic Analytics
 
-Reasoning:
+Analytics fields are:
+- Derived deterministically
+- Computed synchronously
+- Based only on current market data
+
+No AI or probabilistic inference is used at this stage.
+
+---
+
+## No Database (Current Phase)
+
+Deferred because:
 - No user-owned data
 - No write operations
-- Gamma remains source of truth
-- Reduces operational overhead
+- Gamma remains the source of truth
+- Avoids premature infrastructure complexity
 
----
-
-## AI Deferred
-
-AI analysis is deferred until:
-- Market schema stabilizes
-- Analytics needs are proven
-- High-signal features are identified
+Persistent storage is planned only when historical data becomes necessary.

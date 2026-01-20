@@ -13,7 +13,7 @@ This document defines the backend’s **analyzed market** representation.
 
 ---
 
-## AnalyzedMarket (v1)
+## AnalyzedMarket (v2)
 
 Each market includes:
 
@@ -31,6 +31,7 @@ Each market includes:
 - `status`
 - `resolution`
 - `context`
+- **derived analytics fields** (see below)
 
 ---
 
@@ -43,6 +44,7 @@ Markets are explicitly classified as:
 - `Resolved`
 
 Status is derived from raw Gamma fields rather than inferred at the UI layer.
+This ensures consistency across consumers.
 
 ---
 
@@ -53,6 +55,29 @@ Outcomes are normalized into a consistent structure:
 - Label
 - Price (if available)
 - Probability (binary markets only)
+
+Outcome ordering is preserved from the upstream source.
+
+---
+
+## Derived Analytics Fields
+
+In addition to normalized raw data, each market includes **deterministic analytics fields**
+computed at transformation time.
+
+Examples include:
+
+- Confidence or signal heuristics
+- Liquidity-based rankings
+- Entropy or dispersion metrics
+
+These fields are:
+- Deterministic
+- Reproducible
+- Not AI-generated
+- Computed without external state
+
+This allows downstream consumers to reason about markets without reimplementing logic.
 
 ---
 
@@ -70,9 +95,42 @@ Normalization provides:
 
 ---
 
-## Planned Extensions
+## Collection Shape & Pagination
 
-- Market family inference
-- Time interval inference
-- Volatility metrics
-- Historical snapshots
+Market endpoints return markets as a **paginated collection**, not as an unbounded list.
+
+Pagination is cursor-based and deterministic to support:
+- Frontend incremental loading
+- LLM chunking and summarization
+- Future historical storage
+
+### Request Parameters
+
+- `limit` (optional): maximum number of markets to return
+- `cursor` (optional): opaque cursor identifying where to continue
+- `status` (optional): market status filter
+
+Example:
+
+```
+GET /markets?status=active&limit=50&cursor=abc1
+```
+
+### Response Shape
+
+```
+{
+"data": [AnalyzedMarket, ...],
+"next_cursor": "abc123",
+"has_more": true
+}
+```
+
+
+### Ordering Guarantees
+
+- Markets are ordered deterministically (e.g. by id or volume)
+- Cursor pagination avoids offset-based instability
+- Re-fetching with the same cursor is safe and repeatable
+
+Pagination does not alter the `AnalyzedMarket` schema itself.

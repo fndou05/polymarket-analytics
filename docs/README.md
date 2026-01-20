@@ -21,7 +21,7 @@ This is an analytics-first system, not a trading platform.
 - Not a trading backend
 - Not a Polymarket clone
 - Not a system of record
-- Not a real-time streaming service (v1)
+- Not a real-time streaming service
 
 ---
 
@@ -30,6 +30,9 @@ This is an analytics-first system, not a trading platform.
 - Event-based ingestion from Gamma
 - Defensive raw deserialization
 - Raw → analyzed market transformation
+- Deterministic analytics derivation
+- Read-through TTL caching (in-memory or Redis)
+- Cursor-based pagination
 - Request-time filtering
 - Read-only REST API
 
@@ -43,6 +46,8 @@ This is an analytics-first system, not a trading platform.
 - Tokio
 - Reqwest
 - Serde
+- Redis (optional, cache backend)
+- Tracing (structured logs)
 
 ---
 
@@ -50,8 +55,10 @@ This is an analytics-first system, not a trading platform.
 
 - `GET /health`
 - `GET /markets`
-- `GET /markets?status=active|closed|resolved|inactive|all`
+- `GET /markets?status=active|closed|resolved|inactive|all&limit=&cursor=`
 - `GET /markets/:id`
+
+Responses are paginated and include metadata for incremental consumption.
 
 ---
 
@@ -59,21 +66,25 @@ This is an analytics-first system, not a trading platform.
 
 ```
 cargo run
-
-Server runs at:
-http://localhost:3000
+Server runs at: http://localhost:3000
 ```
+
+
+---
 
 ## Project Status
 
-v1 complete
+Backend stable (v2).
 
-Current focus:
-- Stable ingestion
-- Clean API contracts
-- Analytics-ready data
+Current capabilities:
+- Stable event-based ingestion
+- Explicit market normalization
+- Deterministic analytics fields
+- Cursor-based pagination
+- Pluggable caching (in-memory / Redis)
+- Explicit error handling and tracing
 
-Next steps:
-- In-memory caching
-- Improved error handling
-- Documentation polish
+Next planned work:
+- Historical snapshot storage
+- Time-series analytics
+- Frontend integration
